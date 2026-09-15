@@ -21,10 +21,11 @@ const GAMES: Record<string, Game> = {
   pong: { title: 'Pong', blurb: 'first to 5 against the computer' },
   typing: { title: 'Typing test', blurb: 'retype a line of code as fast as you can', unit: ' wpm' },
   invaders: { title: 'Space Invaders', blurb: 'shoot each wave before it lands' },
+  doom: { title: 'Doom', blurb: 'a corridor shooter: imps, a shotgun, and the floor below' },
   pet: { title: 'Pet', blurb: 'grows as Claude tests, commits and edits' },
 }
 // spelled out: Object.keys would put the integer-like '2048' first
-const NAMES = ['snake', 'tetris', '2048', 'minesweeper', 'flappy', 'pong', 'typing', 'invaders', 'pet']
+const NAMES = ['snake', 'tetris', 'doom', '2048', 'minesweeper', 'flappy', 'pong', 'typing', 'invaders', 'pet']
 // random never lands on the pet: it is not a game you play
 const PLAYABLE = NAMES.filter(n => n !== 'pet')
 const PICKER = 'picker'
@@ -37,6 +38,8 @@ let turnStartedAt: number | undefined
 // bumped at each finished turn; the open game pauses when it sees a new value
 let turnsDone = 0
 const best: Record<string, number> = {}
+// a palette and pattern that do not lean on red against green; doom is the game that uses it
+let safe = false
 let pet: Pet | undefined
 
 const isPet = (value: unknown): value is Pet => typeof value === 'object' && value !== null && typeof (value as Pet).xp === 'number'
@@ -61,16 +64,18 @@ export const register: Register = on => {
       const score = Number(await stored(`best:${name}`))
       if (score) best[name] = score
     }
+    safe = (await stored('colorblind')) === true
     await $.command.register({
       name: 'arcade',
       description: 'Games above the prompt: pick one, or list, random, auto, stop (cc-arcade)',
-      argumentHint: '[game | list | random | auto | stop]',
+      argumentHint: '[game | list | random | auto | colorblind | stop]',
       immediate: true,
     }).catch(err => $.ui.log(`cc-arcade: /arcade not registered: ${err}`))
     return r
   })
 
-  on('command.run', { command: 'arcade' }, async ($, e, next) => {
+  // every form of /arcade answers here; none of them passes the command on
+  on('command.run', { command: 'arcade' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     const open = (name: string, why?: string) => {
       active = name
@@ -89,12 +94,18 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
       return { text: 'arcade closed' }
     }
+    if (arg === 'colorblind' || arg === 'cb') {
+      safe = !safe
+      await $.store.set('colorblind', safe).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
+      $.ui.invalidate('ui.render')
+      return { text: `colour-blind mode ${safe ? 'on' : 'off'} · doom swaps in a palette that holds up without red against green, and marks the door and the exit with a pattern each` }
+    }
     if (arg === 'list') {
       const rows = NAMES.map(n => {
         const score = best[n] ? ` · best ${best[n]}${GAMES[n].unit ?? ''}` : ''
         return `${n.padEnd(12)}${GAMES[n].blurb}${score}`
       })
-      return { text: [...rows, '', 'random      a game you did not just play', 'auto        a game for the moment', 'stop        close the arcade'].join('\n') }
+      return { text: [...rows, '', 'random      a game you did not just play', 'auto        a game for the moment', `colorblind  doom without red against green (now ${safe ? 'on' : 'off'})`, 'stop        close the arcade'].join('\n') }
     }
     if (arg === 'random') return open(pickRandom(PLAYABLE, lastGame))
     if (arg === 'auto') {
@@ -152,7 +163,7 @@ export const register: Register = on => {
       await $.store.set(`best:${name}`, score).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
       $.ui.toast(`${name}: new best ${score}${game.unit ?? ''}`)
     }
-    return { props: { best: best[name] ?? 0, done: turnsDone } }
+    return { props: { best: best[name] ?? 0, done: turnsDone, safe } }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -190,7 +201,7 @@ export const register: Register = on => {
     // one row for the back and close buttons, one for whatever else draws in the band
     const rows = Math.max(8, e.props.maxRows - 2)
     const tall = (max: number) => Math.min(rows, max)
-    const props = { best: best[active] ?? 0, done: turnsDone }
+    const props = { best: best[active] ?? 0, done: turnsDone, safe }
     // the key names the board, so switching mounts a fresh one and a redraw keeps the running one;
     // module paths must be string literals, since the engine reads them off this source
     const key = `board:${active}`
@@ -202,6 +213,8 @@ export const register: Register = on => {
       : active === 'flappy' ? <Client key={key} module="./boards/flappy.tsx" width={cols} height={tall(19)} props={props} />
       : active === 'pong' ? <Client key={key} module="./boards/pong.tsx" width={cols} height={tall(18)} props={props} />
       : active === 'invaders' ? <Client key={key} module="./boards/invaders.tsx" width={cols} height={tall(19)} props={props} />
+      // doom is a view, not a board: it takes every row and column the band gives it
+      : active === 'doom' ? <Client key={key} module="./boards/doom.tsx" width={cols} height={rows} props={props} />
       : active === 'pet' ? <Client key={key} module="./boards/pet.tsx" width={cols} props={{ pet, now: $.clock.now() }} />
       : <Client key={key} module="./boards/typing.tsx" width={cols} props={props} />
     // back to the picker, or close; click-only like the picker (no hotkeys: a band hotkey would press
